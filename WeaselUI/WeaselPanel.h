@@ -64,7 +64,7 @@ class WeaselPanel
   void Refresh();
   void DoPaint(CDCHandle dc);
   bool GetIsReposition() { return m_istorepos; }
-  void RedrawWindow();
+  // void RedrawWindow();
 
   static VOID CALLBACK OnTimer(_In_ HWND hwnd,
                                _In_ UINT uMsg,

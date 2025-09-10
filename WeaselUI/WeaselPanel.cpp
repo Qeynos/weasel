@@ -1068,11 +1068,11 @@ void WeaselPanel::DoPaint(CDCHandle dc) {
 
 // 由于某些软件并不依赖 WM_PAINT 消息来重绘，在消息循环中直接忽略掉了 WM_PAINT
 // 消息， 导致 DoPaint() 永远不会被调用，这里手动调用 DoPaint() 强制重绘
-void WeaselPanel::RedrawWindow() {
-  HDC hdc = GetDC();
-  DoPaint(hdc);
-  ReleaseDC(hdc);
-}
+// void WeaselPanel::RedrawWindow() {
+//   HDC hdc = GetDC();
+//   DoPaint(hdc);
+//   ReleaseDC(hdc);
+// }
 
 void WeaselPanel::_LayerUpdate(const CRect& rc, CDCHandle dc) {
   HDC ScreenDC = ::GetDC(NULL);
@@ -1200,8 +1200,8 @@ void WeaselPanel::_RepositionWindow(const bool& adj) {
     x = rcWorkArea.left;  // over workarea left
   // show panel above the input focus if we're around the bottom
   if (y > rcWorkArea.bottom || m_sticky) {
-    if (!m_sticky)
-      m_sticky = true;
+    // if (!m_sticky)
+    //   m_sticky = true;
     y = m_inputPos.top - height - 6;  // over workarea bottom
     if (DPI_SCALE(m_style.shadow_radius) &&
         DPI_SCALE(m_style.shadow_offset_y) > 0)
