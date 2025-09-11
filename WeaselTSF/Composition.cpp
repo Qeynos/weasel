@@ -4,6 +4,8 @@
 #include "ResponseParser.h"
 #include "CandidateList.h"
 
+extern bool g_panelDestroyed;
+
 /* Start Composition */
 class CStartCompositionEditSession : public CEditSession {
  public:
@@ -162,11 +164,27 @@ STDAPI CGetTextExtentEditSession::DoEditSession(TfEditCookie ec) {
   BOOL fClipped;
   TF_SELECTION selection;
   ULONG nSelection;
+  
+  enum class PositionState {
+    Unknown,
+    Drifted,
+    Recovered
+  };
 
   static RECT _prevRc;
   static bool _hasPrevRc;
   static int _handlingCount;
   static std::wstring _cachedClassName;
+  static PositionState _positionState = PositionState::Unknown;
+
+  if (g_panelDestroyed && _pComposition || !_pComposition) {
+    _hasPrevRc = false;
+    _prevRc = {0,0,0,0};
+    _handlingCount = 6;
+    _cachedClassName.clear();
+    _positionState = PositionState::Unknown;
+    g_panelDestroyed  = false;
+  }
 
   if (FAILED(_pContext->QueryInterface(IID_ITfInsertAtSelection,
                                        (LPVOID*)&pInsertAtSelection)))
@@ -187,33 +205,40 @@ STDAPI CGetTextExtentEditSession::DoEditSession(TfEditCookie ec) {
       (rc.left != 0 || rc.top != 0)) {
     // get the foreground window pos and check if rc from GetTextExt is out of
     // window
-    if (!_pComposition && _cachedClassName.empty()) {
-      HWND hwnd = NULL;
-      if (SUCCEEDED(_pContextView->GetWnd(&hwnd)) && hwnd != NULL) {
-        wchar_t className[256] = {0};
-        if (GetClassNameW(hwnd, className, ARRAYSIZE(className)) > 0) {
-          _cachedClassName = className;
+    if (_pComposition) {
+      if (_cachedClassName.empty()) {
+        HWND hwnd_className = NULL;
+        if (SUCCEEDED(_pContextView->GetWnd(&hwnd_className)) && hwnd_className != NULL) {
+          wchar_t className[256] = {0};
+          if (GetClassNameW(hwnd_className, className, ARRAYSIZE(className)) > 0) {
+            _cachedClassName = className;
+          }
         }
       }
-    }
 
-    HWND hwnd = NULL;
-    if (_handlingCount > 0 && !_cachedClassName.empty()) {
-      if (_cachedClassName.rfind(L"Chrome_WidgetWin_", 0) == 0) {
-        if (_hasPrevRc) {
-          rc = _prevRc;
-          _handlingCount--;
-        } else {
-          _prevRc = rc;
-          _hasPrevRc = true;
+      if (_handlingCount > 0 && !_cachedClassName.empty()){
+        if (_cachedClassName.rfind(L"Chrome_WidgetWin_", 0) == 0) {
+          if (_hasPrevRc) {
+            if (EqualRect(&rc, &_prevRc)) {
+              if (_positionState == PositionState::Drifted) {
+                _positionState = PositionState::Recovered;
+                _handlingCount = 0;
+              } else {
+                _handlingCount--;
+              }
+            } else{
+              rc = _prevRc;
+              _handlingCount--;
+              if (_positionState == PositionState::Unknown) {
+                _positionState = PositionState::Drifted;
+              }
+            }
+          } else {
+            _prevRc = rc;
+            _hasPrevRc = true;
+          }
         }
       }
-    }
-
-    if (!_pComposition) {
-      _hasPrevRc = false;
-      _prevRc = {0, 0, 0, 0};
-      _handlingCount = 2;
     }
 
     if (_enhancedPosition) {

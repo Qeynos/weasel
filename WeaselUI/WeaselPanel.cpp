@@ -24,6 +24,8 @@
 
 #pragma comment(lib, "Shcore.lib")
 
+bool g_panelDestroyed = false;
+
 template <class t0, class t1, class t2>
 inline void LoadIconNecessary(t0& a, t1& b, t2& c, int d) {
   if (a == b)
@@ -1106,6 +1108,7 @@ LRESULT WeaselPanel::OnDestroy(UINT uMsg,
   m_sticky = false;
   delete m_layout;
   m_layout = NULL;
+  g_panelDestroyed = true;
   return 0;
 }
 
