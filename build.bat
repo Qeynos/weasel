@@ -161,8 +161,8 @@ if %build_rime% == 1 (
   set ARCH=x64
   call :build_librime_platform x64 %WEASEL_ROOT%\lib64 %WEASEL_ROOT%\output
   rem build Win32 librime
-  set ARCH=Win32
-  call :build_librime_platform Win32 %WEASEL_ROOT%\lib %WEASEL_ROOT%\output\Win32
+  @REM  set ARCH=Win32
+  @REM  call :build_librime_platform Win32 %WEASEL_ROOT%\lib %WEASEL_ROOT%\output\Win32
   rem clean the modified file
   rem git checkout .
   rem git submodule foreach git checkout .
@@ -209,8 +209,8 @@ if %build_arm64% == 1 (
 
 msbuild.exe weasel.sln %build_option% /p:Configuration=%build_config% /p:Platform="x64" /fl2 %build_sdk_option%
 if errorlevel 1 goto error
-msbuild.exe weasel.sln %build_option% /p:Configuration=%build_config% /p:Platform="Win32" /fl1 %build_sdk_option%
-if errorlevel 1 goto error
+@REM  msbuild.exe weasel.sln %build_option% /p:Configuration=%build_config% /p:Platform="Win32" /fl1 %build_sdk_option%
+@REM  if errorlevel 1 goto error
 
 if %build_arm64% == 1 (
   pushd arm64x_wrapper
@@ -252,29 +252,29 @@ rem build boost
     runtime-link=static^
     --build-type=complete
   
-  set BJAM_OPTIONS_X86=%BJAM_OPTIONS_COMMON%^
-    architecture=x86^
-    address-model=32
+  @REM  set BJAM_OPTIONS_X86=%BJAM_OPTIONS_COMMON%^
+  @REM    architecture=x86^
+  @REM    address-model=32
   
   set BJAM_OPTIONS_X64=%BJAM_OPTIONS_COMMON%^
     architecture=x86^
     address-model=64
   
-  set BJAM_OPTIONS_ARM32=%BJAM_OPTIONS_COMMON%^
-    define=BOOST_USE_WINAPI_VERSION=0x0A00^
-    architecture=arm^
-    address-model=32
+  @REM  set BJAM_OPTIONS_ARM32=%BJAM_OPTIONS_COMMON%^
+  @REM    define=BOOST_USE_WINAPI_VERSION=0x0A00^
+  @REM    architecture=arm^
+  @REM    address-model=32
   
-  set BJAM_OPTIONS_ARM64=%BJAM_OPTIONS_COMMON%^
-    define=BOOST_USE_WINAPI_VERSION=0x0A00^
-    architecture=arm^
-    address-model=64
+  @REM  set BJAM_OPTIONS_ARM64=%BJAM_OPTIONS_COMMON%^
+  @REM    define=BOOST_USE_WINAPI_VERSION=0x0A00^
+  @REM    architecture=arm^
+  @REM    address-model=64
   
   cd /d %BOOST_ROOT%
   if not exist b2.exe call bootstrap.bat
   if errorlevel 1 goto error
-  b2 %BJAM_OPTIONS_X86% stage %BOOST_COMPILED_LIBS%
-  if errorlevel 1 goto error
+  @REM  b2 %BJAM_OPTIONS_X86% stage %BOOST_COMPILED_LIBS%
+  @REM  if errorlevel 1 goto error
   b2 %BJAM_OPTIONS_X64% stage %BOOST_COMPILED_LIBS%
   if errorlevel 1 goto error
   

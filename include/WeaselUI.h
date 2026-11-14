@@ -8,9 +8,38 @@
 #include <dwrite_2.h>
 #include <memory>
 #include <functional>
+#include <mutex>
 #include <WeaselUtility.h>
 
 namespace weasel {
+
+// 保护界面对象的递归锁。
+// 服务端的 IPC 管道线程（更新候选/状态）与窗口消息线程（绘制、定时器、鼠标）
+// 会同时访问 WeaselPanel / UI / DirectWrite 资源，原先没有任何同步，
+// 会踩坏 std::wstring / shared_ptr / 已 delete 的 layout，最终在堆操作里崩掉。
+// 注意：任何可能阻塞等待其它进程的操作（如 Shell_NotifyIcon）都不得在持锁时进行。
+inline std::recursive_mutex& ui_lock() {
+  static std::recursive_mutex lock;
+  return lock;
+}
+
+struct UILock {
+  UILock() : guard(ui_lock()) {}
+
+ private:
+  std::lock_guard<std::recursive_mutex> guard;
+};
+
+// 供窗口線程（WM_PAINT / 定時器 / 鼠標）使用：取不到鎖就放棄本輪，絕不阻塞。
+// 管道線程持鎖期間會做跨線程的窗口操作（SetWindowPos/ShowWindow 等會同步
+// 發消息給窗口線程），窗口線程若在等鎖就會和它互相等待。
+struct UITryLock {
+  UITryLock() : guard(ui_lock(), std::try_to_lock) {}
+  bool owns() const { return guard.owns_lock(); }
+
+ private:
+  std::unique_lock<std::recursive_mutex> guard;
+};
 
 enum ClientCapabilities {
   INLINE_PREEDIT_CAPABLE = 1,

@@ -1,6 +1,9 @@
 #pragma once
 #include <WeaselIPC.h>
+#include <atomic>
+#include <functional>
 #include <map>
+#include <mutex>
 #include <Winnt.h>   // for security attributes constants
 #include <aclapi.h>  // for ACL
 #include <boost/thread.hpp>
@@ -10,6 +13,9 @@
 
 namespace weasel {
 class PipeServer;
+
+// 保護 RequestHandler / rime 的全局鎖（遞歸：管道線程與 UI 線程可能嵌套調用）
+std::recursive_mutex& ApiMutex();
 
 typedef CWinTraits<WS_DISABLED, WS_EX_TRANSPARENT> ServerWinTraits;
 
@@ -28,6 +34,7 @@ class ServerImpl : public CWindowImpl<ServerImpl, CWindow, ServerWinTraits>
   MESSAGE_HANDLER(WM_DWMCOLORIZATIONCOLORCHANGED, OnColorChange)
   MESSAGE_HANDLER(WM_SETTINGCHANGE, OnColorChange)
   MESSAGE_HANDLER(WM_COMMAND, OnCommand)
+  MESSAGE_HANDLER(WEASEL_WM_UI_UPDATE, OnUIUpdate)
   END_MSG_MAP()
 
   LRESULT OnColorChange(UINT uMsg,
@@ -70,6 +77,7 @@ class ServerImpl : public CWindowImpl<ServerImpl, CWindow, ServerWinTraits>
                                           DWORD wParam,
                                           DWORD lParam);
   DWORD OnChangePage(WEASEL_IPC_COMMAND uMsg, DWORD wParam, DWORD lParam);
+  LRESULT OnUIUpdate(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
 
  public:
   ServerImpl();
@@ -85,16 +93,27 @@ class ServerImpl : public CWindowImpl<ServerImpl, CWindow, ServerWinTraits>
   void AddMenuHandler(UINT uID, CommandHandler& handler) {
     m_MenuHandlers[uID] = handler;
   }
+  void SetUIUpdateHandler(UIUpdateHandler handler) {
+    m_uiUpdateHandler = handler;
+  }
+  // 任意線程調用；投遞到 UI 線程執行一次界面/托盤刷新
+  void PostUIUpdate();
 
  private:
   void _Finailize();
   template <typename _Resp>
   void HandlePipeMessage(PipeMessage pipe_msg, _Resp resp);
 
-  std::unique_ptr<PipeServer> channel;
+  std::shared_ptr<PipeServer> channel;
   std::unique_ptr<boost::thread> pipeThread;
   RequestHandler* m_pRequestHandler;  // reference
   std::map<UINT, CommandHandler> m_MenuHandlers;
+  UIUpdateHandler m_uiUpdateHandler;
+  std::atomic<bool> m_uiUpdatePosted{false};
+  // 維護（部署/同步）期間為 true：管道請求走快速通道，不再排隊等 ApiMutex
+  std::atomic<bool> m_inMaintenance{false};
+  // 析構後管道線程可能仍在運行，用它避免再解引用 *this
+  std::shared_ptr<std::atomic<bool>> m_alive;
   HMODULE m_hUser32Module;
   SecurityAttribute sa;
   BOOL m_darkMode;

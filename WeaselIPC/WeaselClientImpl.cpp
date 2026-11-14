@@ -1,4 +1,4 @@
-﻿#include "stdafx.h"
+#include "stdafx.h"
 #include "WeaselClientImpl.h"
 #include <StringAlgorithm.hpp>
 
@@ -197,6 +197,11 @@ LRESULT ClientImpl::_SendMessage(WEASEL_IPC_COMMAND Msg,
     PipeMessage req{Msg, wParam, lParam};
     return channel.Transact(req);
   } catch (DWORD /* ex */) {
+    return 0;
+  } catch (...) {
+    // 最後一道防線：任何未預期的異常（boost::system_error、bad_alloc、
+    // 型別不符的 throw……）都必須在這裡攔住。這裡是 TSF/IMM32 的回調路徑，
+    // 讓異常穿出去 = Windows 以 0xc000041d 殺掉整個宿主程序。
     return 0;
   }
 }

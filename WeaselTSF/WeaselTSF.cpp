@@ -234,30 +234,43 @@ void WeaselTSF::_Reconnect() {
 
 static unsigned int retry = 0;
 
+// WeaselDeployer 進行部署/同步時會持有這個互斥體。此期間服務端是有意
+// 暫停服務的，客戶端不應該去搶著重連或再拉起一個服務進程。
+static bool IsWeaselDeployerRunning() {
+  HANDLE hMutex = CreateMutex(NULL, FALSE, L"WeaselDeployerExclusiveMutex");
+  const DWORD last_error = GetLastError();  // 必須緊跟 CreateMutex 讀取
+  if (hMutex)
+    CloseHandle(hMutex);
+  return last_error == ERROR_ALREADY_EXISTS;
+}
+
 bool WeaselTSF::_EnsureServerConnected() {
-  if (!m_client.Echo()) {
-    _Reconnect();
-    retry++;
-    if (retry >= 6) {
-      HANDLE hMutex = CreateMutex(NULL, TRUE, L"WeaselDeployerExclusiveMutex");
-      if (!m_client.Echo() && GetLastError() != ERROR_ALREADY_EXISTS) {
-        std::wstring dir = _GetRootDir();
-        std::thread th([dir, this]() {
-          ShellExecuteW(NULL, L"open", (dir + L"\\start_service.bat").c_str(),
-                        NULL, dir.c_str(), SW_HIDE);
-          // wait 500ms, then reconnect
-          std::this_thread::sleep_for(std::chrono::milliseconds(500));
-          _Reconnect();
-        });
-        th.detach();
-      }
-      if (hMutex) {
-        CloseHandle(hMutex);
-      }
-      retry = 0;
-    }
-    return (m_client.Echo() != 0);
-  } else {
+  if (m_client.Echo()) {
+    retry = 0;
     return true;
   }
+  if (IsWeaselDeployerRunning()) {
+    // 部署中：本按鍵直接放行給應用，不做任何重連（否則每個按鍵都會
+    // 觸發 Disconnect/Connect/StartSession，並把服務端從部署中拽起來）
+    return false;
+  }
+  _Reconnect();
+  if (m_client.Echo()) {
+    retry = 0;
+    return true;
+  }
+  if (++retry < 6) {
+    return false;
+  }
+  retry = 0;
+  // 拉起服務進程。注意：不能在 detach 出去的線程裏回調 _Reconnect()，
+  // 那會在非 UI 線程上訪問 m_client/_status/候選窗，而且本對象被釋放後
+  // 就是 use-after-free。重連留給下一次按鍵在主線程上做。
+  std::wstring dir = _GetRootDir();
+  std::thread th([dir]() {
+    ShellExecuteW(NULL, L"open", (dir + L"\\start_service.bat").c_str(), NULL,
+                  dir.c_str(), SW_HIDE);
+  });
+  th.detach();
+  return false;
 }

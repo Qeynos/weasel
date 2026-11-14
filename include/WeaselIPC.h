@@ -89,6 +89,12 @@ typedef std::function<bool(LPWSTR buffer, DWORD length)> ResponseHandler;
 // 事件處理函數
 typedef std::function<bool()> CommandHandler;
 
+// 界面刷新請求處理函數（在 UI 線程上執行）
+typedef std::function<void()> UIUpdateHandler;
+
+// 請求在服務端 UI 線程上刷新界面/托盤
+#define WEASEL_WM_UI_UPDATE (WM_APP + 0x100)
+
 // 啟動服務進程之物件
 typedef CommandHandler ServerLauncher;
 
@@ -161,6 +167,10 @@ class Server {
 
   void SetRequestHandler(RequestHandler* pHandler);
   void AddMenuHandler(UINT uID, CommandHandler handler);
+  // 從任意線程請求一次界面/托盤刷新（異步，投遞到 UI 線程）
+  void PostUIUpdate();
+  // 注冊在 UI 線程上執行的刷新回調
+  void SetUIUpdateHandler(UIUpdateHandler handler);
   HWND GetHWnd();
 
  private:

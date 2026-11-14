@@ -217,21 +217,23 @@ int Configurator::SyncUserData() {
     client.StartMaintenance();
   }
 
+  bool sync_ok = true;
   {
     RimeApi* rime = rime_get_api();
     if (!rime->sync_user_data()) {
       LOG(ERROR) << "Error synching user data.";
-      CloseHandle(hMutex);
-      return 1;
+      sync_ok = false;
+    } else {
+      rime->join_maintenance_thread();
     }
-    rime->join_maintenance_thread();
   }
-
+  // 無論同步成功與否都必須恢復服務，否則服務端會一直停在維護模式，
+  // 客戶端每次按鍵都會去重連/拉起服務，形成風暴。
   CloseHandle(hMutex);  // should be closed before resuming service.
 
   if (client.Connect()) {
     LOG(INFO) << "Resuming service.";
     client.EndMaintenance();
   }
-  return 0;
+  return sync_ok ? 0 : 1;
 }

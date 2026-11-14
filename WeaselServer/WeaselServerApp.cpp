@@ -30,13 +30,18 @@ int WeaselServerApp::Run() {
   m_ui.Create(m_server.GetHWnd());
 
   m_handler->Initialize();
-  m_handler->OnUpdateUI([this]() { tray_icon.Refresh(); });
+  // 管道線程只“請求”刷新，真正的托盤操作投遞到 UI 線程執行：
+  // Shell_NotifyIcon 會同步通知 explorer，不能在管道線程上做（會死鎖）。
+  m_handler->OnUpdateUI([this]() { m_server.PostUIUpdate(); });
 
   tray_icon.Create(m_server.GetHWnd());
+  m_server.SetUIUpdateHandler([this]() { tray_icon.Refresh(); });
   tray_icon.Refresh();
 
   int ret = m_server.Run();
 
+  // 先斷開 RequestHandler 再析構它，避免殘留的管道線程踩到已釋放的對象
+  m_server.SetRequestHandler(nullptr);
   m_handler->Finalize();
   m_ui.Destroy();
   tray_icon.RemoveIcon();

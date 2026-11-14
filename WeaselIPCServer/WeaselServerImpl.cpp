@@ -6,7 +6,25 @@
 #include <WeaselUtility.h>
 
 namespace weasel {
-class PipeServer : public PipeChannel<DWORD, PipeMessage> {
+std::recursive_mutex& ApiMutex() {
+  static std::recursive_mutex mutex;
+  return mutex;
+}
+
+namespace {
+// 維護狀態的生命週期保護：即使處理器拋異常也要恢復正常應答
+struct MaintenanceScope {
+  explicit MaintenanceScope(std::atomic<bool>& f) : flag(f) {
+    flag.store(true);
+  }
+  ~MaintenanceScope() { flag.store(false); }
+  std::atomic<bool>& flag;
+};
+}  // namespace
+
+class PipeServer
+    : public PipeChannel<DWORD, PipeMessage>,
+      public std::enable_shared_from_this<PipeServer> {
  public:
   using ServerRunner = std::function<void()>;
   using Respond = std::function<void(Msg)>;
@@ -29,9 +47,10 @@ using namespace weasel;
 extern CAppModule _Module;
 
 ServerImpl::ServerImpl()
-    : m_pRequestHandler(NULL),
-      m_darkMode(IsUserDarkMode()),
-      channel(std::make_unique<PipeServer>(GetPipeName(), sa.get_attr())) {
+    : channel(std::make_shared<PipeServer>(GetPipeName(), sa.get_attr())),
+      m_pRequestHandler(NULL),
+      m_alive(std::make_shared<std::atomic<bool>>(true)),
+      m_darkMode(IsUserDarkMode()) {
   m_hUser32Module = GetModuleHandle(_T("user32.dll"));
 }
 
@@ -40,6 +59,10 @@ ServerImpl::~ServerImpl() {
 }
 
 void ServerImpl::_Finailize() {
+  // 管道線程可能還活著（detach 後），先斷開它對本對象的引用
+  if (m_alive)
+    m_alive->store(false);
+  m_pRequestHandler = nullptr;
   if (pipeThread != nullptr) {
     pipeThread->interrupt();
     pipeThread = nullptr;
@@ -57,11 +80,34 @@ LRESULT ServerImpl::OnColorChange(UINT uMsg,
                                   WPARAM wParam,
                                   LPARAM lParam,
                                   BOOL& bHandled) {
+  // 這個回調在 UI 線程上跑，而 RequestHandler/rime 由管道線程使用，
+  // 必須和 HandlePipeMessage 用同一把（遞歸）鎖。
+  std::lock_guard<std::recursive_mutex> guard(ApiMutex());
+  if (!m_pRequestHandler)
+    return 0;
   if (IsUserDarkMode() != m_darkMode) {
     m_darkMode = IsUserDarkMode();
     m_pRequestHandler->UpdateColorTheme(m_darkMode);
   }
   return 0;
+}
+
+LRESULT ServerImpl::OnUIUpdate(UINT uMsg,
+                               WPARAM wParam,
+                               LPARAM lParam,
+                               BOOL& bHandled) {
+  m_uiUpdatePosted.store(false);
+  if (m_uiUpdateHandler)
+    m_uiUpdateHandler();
+  return 0;
+}
+
+void ServerImpl::PostUIUpdate() {
+  if (!IsWindow())
+    return;
+  if (m_uiUpdatePosted.exchange(true))
+    return;  // 已經有一個刷新請求在隊列裏了
+  PostMessage(WEASEL_WM_UI_UPDATE);
 }
 
 LRESULT ServerImpl::OnCreate(UINT uMsg,
@@ -100,6 +146,7 @@ LRESULT ServerImpl::OnEndSystemSession(UINT uMsg,
                                        WPARAM wParam,
                                        LPARAM lParam,
                                        BOOL& bHandled) {
+  std::lock_guard<std::recursive_mutex> guard(ApiMutex());
   if (m_pRequestHandler) {
     m_pRequestHandler->Finalize();
     m_pRequestHandler = nullptr;
@@ -111,17 +158,23 @@ LRESULT ServerImpl::OnCommand(UINT uMsg,
                               WPARAM wParam,
                               LPARAM lParam,
                               BOOL& bHandled) {
+  // 可能是 UI 線程（托盤菜單）或管道線程（WEASEL_IPC_TRAY_COMMAND）調用
   UINT uID = LOWORD(wParam);
   switch (uID) {
     case ID_WEASELTRAY_ENABLE_ASCII:
-      m_pRequestHandler->SetOption(lParam, "ascii_mode", true);
+    case ID_WEASELTRAY_DISABLE_ASCII: {
+      // 只有這兩個命令會碰 RequestHandler/rime，需要和管道線程互斥
+      std::lock_guard<std::recursive_mutex> guard(ApiMutex());
+      if (!m_pRequestHandler)
+        return 0;
+      m_pRequestHandler->SetOption(
+          lParam, "ascii_mode", uID == ID_WEASELTRAY_ENABLE_ASCII);
       return 0;
-    case ID_WEASELTRAY_DISABLE_ASCII:
-      m_pRequestHandler->SetOption(lParam, "ascii_mode", false);
-      return 0;
+    }
     default:;
   }
 
+  // 菜單命令（部署、設置、檢查更新……）可能很慢，不能佔着全局鎖
   std::map<UINT, CommandHandler>::iterator it = m_MenuHandlers.find(uID);
   if (it == m_MenuHandlers.end()) {
     bHandled = FALSE;
@@ -162,8 +215,6 @@ int ServerImpl::Stop() {
   return 0;
 }
 
-static std::mutex g_api_mutex;
-
 int ServerImpl::Run() {
   // This workaround causes a VC internal error:
   // void PipeServer::Listen(ServerHandler handler);
@@ -171,12 +222,26 @@ int ServerImpl::Run() {
   // auto handler = boost::bind(&ServerImpl::HandlePipeMessage, this);
   // auto listener = boost::bind(&PipeServer::Listen, channel.get(), handler);
   //
-  auto listener = [this](PipeMessage msg, PipeServer::Respond resp) -> void {
-    std::lock_guard guard(g_api_mutex);
+  auto alive = m_alive;
+  auto listener = [this, alive](PipeMessage msg,
+                                PipeServer::Respond resp) -> void {
+    // 服務對象析構後管道線程可能仍在跑，不要再碰 this
+    if (!alive || !alive->load())
+      return;
+    // 部署/同步期間：除了“結束維護”和“退出”，其餘請求立即應答。
+    // 決不能讓它們排在 ApiMutex 後面——那意味著用戶每敲一個鍵、每點一下
+    // 候選窗，所屬程序（包括 explorer）都要等整個部署跑完。
+    if (m_inMaintenance.load() && msg.Msg != WEASEL_IPC_END_MAINTENANCE &&
+        msg.Msg != WEASEL_IPC_SHUTDOWN_SERVER) {
+      resp(0);
+      return;
+    }
+    std::lock_guard<std::recursive_mutex> guard(ApiMutex());
     HandlePipeMessage(msg, resp);
   };
+  std::shared_ptr<PipeServer> ch = channel;
   pipeThread = std::make_unique<boost::thread>(
-      [this, &listener]() { channel->Listen(listener); });
+      [ch, listener]() { ch->Listen(listener); });
 
   CMessageLoop theLoop;
   _Module.AddMessageLoop(&theLoop);
@@ -281,11 +346,13 @@ DWORD ServerImpl::OnUpdateInputPosition(WEASEL_IPC_COMMAND uMsg,
     PPTLPFPMDPI PhysicalToLogicalPointForPerMonitorDPI =
         (PPTLPFPMDPI)::GetProcAddress(m_hUser32Module,
                                       "PhysicalToLogicalPointForPerMonitorDPI");
-    POINT lt = {rc.left, rc.top};
-    POINT rb = {rc.right, rc.bottom};
-    PhysicalToLogicalPointForPerMonitorDPI(NULL, &lt);
-    PhysicalToLogicalPointForPerMonitorDPI(NULL, &rb);
-    rc = {lt.x, lt.y, rb.x, rb.y};
+    if (PhysicalToLogicalPointForPerMonitorDPI) {
+      POINT lt = {rc.left, rc.top};
+      POINT rb = {rc.right, rc.bottom};
+      PhysicalToLogicalPointForPerMonitorDPI(NULL, &lt);
+      PhysicalToLogicalPointForPerMonitorDPI(NULL, &rb);
+      rc = {lt.x, lt.y, rb.x, rb.y};
+    }
   }
 
   m_pRequestHandler->UpdateInputPosition(rc, lParam);
@@ -295,6 +362,8 @@ DWORD ServerImpl::OnUpdateInputPosition(WEASEL_IPC_COMMAND uMsg,
 DWORD ServerImpl::OnStartMaintenance(WEASEL_IPC_COMMAND uMsg,
                                      DWORD wParam,
                                      DWORD lParam) {
+  // 先置位：本次 finalize + UI 更新期間，後續請求走快速通道
+  m_inMaintenance.store(true);
   if (m_pRequestHandler)
     m_pRequestHandler->StartMaintenance();
   return 0;
@@ -303,6 +372,8 @@ DWORD ServerImpl::OnStartMaintenance(WEASEL_IPC_COMMAND uMsg,
 DWORD ServerImpl::OnEndMaintenance(WEASEL_IPC_COMMAND uMsg,
                                    DWORD wParam,
                                    DWORD lParam) {
+  // Initialize() 可能很慢，這期間仍然走快速通道，返回前才解除
+  MaintenanceScope scope(m_inMaintenance);
   if (m_pRequestHandler)
     m_pRequestHandler->EndMaintenance();
   return 0;
@@ -406,13 +477,15 @@ PipeServer::PipeServer(std::wstring&& pn_cmd, SECURITY_ATTRIBUTES* s)
     : PipeChannel(std::move(pn_cmd), s) {}
 
 void PipeServer::Listen(ServerHandler const& handler) {
+  // 每個連接線程都持有 shared_ptr，避免 ServerImpl 析構後線程踩到已釋放的對象
+  std::shared_ptr<PipeServer> self = shared_from_this();
   for (;;) {
     HANDLE pipe = INVALID_HANDLE_VALUE;
     try {
       boost::this_thread::interruption_point();
       pipe = _ConnectServerPipe(pname);
       boost::thread th(
-          [&handler, pipe, this] { _ProcessPipeThread(pipe, handler); });
+          [self, handler, pipe] { self->_ProcessPipeThread(pipe, handler); });
     } catch (DWORD ex) {
       _FinalizePipe(pipe);
     }
@@ -464,6 +537,14 @@ void Server::SetRequestHandler(RequestHandler* pHandler) {
 
 void Server::AddMenuHandler(UINT uID, CommandHandler handler) {
   m_pImpl->AddMenuHandler(uID, handler);
+}
+
+void Server::PostUIUpdate() {
+  m_pImpl->PostUIUpdate();
+}
+
+void Server::SetUIUpdateHandler(UIUpdateHandler handler) {
+  m_pImpl->SetUIUpdateHandler(handler);
 }
 
 HWND Server::GetHWnd() {

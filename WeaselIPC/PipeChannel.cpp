@@ -6,8 +6,33 @@ using namespace weasel;
 using namespace std;
 using namespace boost;
 
+namespace {
+// 客戶端等待服務端回應的上限。IME 是在宿主程序的 UI 線程上同步調用 IPC 的，
+// 沒有上限就意味著服務端一卡住，整個程序（包括 explorer）就永遠卡死。
+const DWORD kClientReadTimeoutMs = 3000;
+
+// 消息模式下，只要管道裏有可讀數據，就說明一條完整報文已經到達
+// （服務端總是用一次 WriteFile 寫完整條報文），因此可以安全地 ReadFile。
+bool _WaitReadable(HANDLE pipe, DWORD timeout_ms) {
+  ULONGLONG start = ::GetTickCount64();
+  for (;;) {
+    DWORD avail = 0;
+    if (!::PeekNamedPipe(pipe, NULL, 0, NULL, &avail, NULL))
+      return false;  // 管道已斷開
+    if (avail > 0)
+      return true;
+    if (::GetTickCount64() - start >= timeout_ms)
+      return false;
+    ::Sleep(1);
+  }
+}
+}  // namespace
+
 #define _ThrowLastError throw ::GetLastError()
-#define _ThrowCode(__c) throw __c
+// 必須拋出和 catch (DWORD) 完全相同的型別：ERROR_TIMEOUT 這類宏是 long，
+// 直接 throw 出去的型別是 long，catch (DWORD) 接不到，異常會一路穿出 TSF
+// 回調，Windows 就以 0xc000041d (fatal user callback exception) 終止宿主進程。
+#define _ThrowCode(__c) throw static_cast<DWORD>(__c)
 #define _ThrowIfNot(__c)                 \
   {                                      \
     DWORD err;                           \
@@ -100,6 +125,12 @@ void PipeChannelBase::_FinalizePipe(HANDLE& p) {
 
 void PipeChannelBase::_Receive(HANDLE pipe, LPVOID msg, size_t rec_len) {
   DWORD lread;
+  // 只對客戶端自己的連接設超時；服務端連接線程可以一直等客戶端發消息。
+  if (pipe == hpipe && !_WaitReadable(pipe, kClientReadTimeoutMs)) {
+    // 報文已經錯位，直接丟棄這條連接，下次請求會自動重連
+    _FinalizePipe(hpipe);
+    _ThrowCode(ERROR_TIMEOUT);
+  }
   BOOL success = ::ReadFile(pipe, msg, rec_len, &lread, NULL);
   if (!success) {
     _ThrowIfNot(ERROR_MORE_DATA);

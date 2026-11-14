@@ -74,19 +74,14 @@ bool _UpdateUIStyleColor(RimeConfig* config,
                          std::string color = "");
 void _LoadAppOptions(RimeConfig* config, AppOptionsByAppName& app_options);
 
-void _RefreshTrayIcon(const RimeSessionId session_id,
-                      const std::function<void()> _UpdateUICallback) {
-  // Dangerous, don't touch
-  static char app_name[256] = {0};
-  auto ret = rime_api->get_property(session_id, "client_app", app_name,
-                                    sizeof(app_name) - 1);
-  if (!ret || u8tow(app_name) == std::wstring(L"explorer.exe"))
-    boost::thread th([=]() {
-      ::Sleep(100);
-      if (_UpdateUICallback)
-        _UpdateUICallback();
-    });
-  else if (_UpdateUICallback)
+// 只“请求”刷新托盘，真正的托盘操作在服务端 UI 线程上执行。
+// 不能在这个函数里直接做：它运行在 IPC 管道线程上，直接刷新会走到
+// Shell_NotifyIcon -> 同步等待 explorer 的托盘窗口；而 explorer 自己
+// 很可能正阻塞在等待我们的管道响应上，于是双方互等，整个桌面卡死。
+// （原先针对 explorer.exe 的 detach 线程只是把死锁挪到别的线程，
+//   并且每次刷新都新建线程，部署期间会堆出成百上千个线程。）
+void _RefreshTrayIcon(const std::function<void()> _UpdateUICallback) {
+  if (_UpdateUICallback)
     _UpdateUICallback();
 }
 
@@ -109,6 +104,7 @@ void RimeWithWeaselHandler::_Setup() {
 }
 
 void RimeWithWeaselHandler::Initialize() {
+  UILock ui_guard;
   m_disabled = _IsDeployerRunning();
   if (m_disabled) {
     return;
@@ -167,9 +163,16 @@ DWORD RimeWithWeaselHandler::FindSession(WeaselSessionId ipc_id) {
 }
 
 DWORD RimeWithWeaselHandler::AddSession(LPWSTR buffer, EatLine eat) {
+  UILock ui_guard;
   if (m_disabled) {
-    DLOG(INFO) << "Trying to resume service.";
-    EndMaintenance();
+    // 部署/同步进行中时，绝不能因为某个客户端来了一个 StartSession
+    // 就在管道线程里重新 Initialize() rime：那会在 WeaselDeployer 正在
+    // 改写用户目录/编译词典的同时重入 rime 初始化，还会在每敲一个键时
+    // 触发一次 _UpdateUI(0) 和一次托盘刷新。等部署结束再恢复服务。
+    if (!_IsDeployerRunning()) {
+      DLOG(INFO) << "Trying to resume service.";
+      EndMaintenance();
+    }
     if (m_disabled)
       return 0;
   }
@@ -200,7 +203,7 @@ DWORD RimeWithWeaselHandler::AddSession(LPWSTR buffer, EatLine eat) {
     _LoadSchemaSpecificSettings(ipc_id, schema_id);
     _LoadAppInlinePreeditSet(ipc_id, true);
     _UpdateInlinePreeditStatus(ipc_id);
-    _RefreshTrayIcon(session_id, _UpdateUICallback);
+    _RefreshTrayIcon(_UpdateUICallback);
     session_status.status = status;
     session_status.__synced = false;
     rime_api->free_status(&status);
@@ -218,6 +221,7 @@ DWORD RimeWithWeaselHandler::AddSession(LPWSTR buffer, EatLine eat) {
 }
 
 DWORD RimeWithWeaselHandler::RemoveSession(WeaselSessionId ipc_id) {
+  UILock ui_guard;
   if (m_ui)
     m_ui->Hide();
   if (m_disabled)
@@ -231,6 +235,7 @@ DWORD RimeWithWeaselHandler::RemoveSession(WeaselSessionId ipc_id) {
 }
 
 void RimeWithWeaselHandler::UpdateColorTheme(BOOL darkMode) {
+  UILock ui_guard;
   RimeConfig config = {NULL};
   if (rime_api->config_open("weasel", &config)) {
     if (m_ui) {
@@ -356,6 +361,7 @@ void RimeWithWeaselHandler::FocusIn(DWORD client_caps, WeaselSessionId ipc_id) {
 }
 
 void RimeWithWeaselHandler::FocusOut(DWORD param, WeaselSessionId ipc_id) {
+  UILock ui_guard;
   DLOG(INFO) << "Focus out: ipc_id = " << ipc_id;
   if (m_ui)
     m_ui->Hide();
@@ -364,6 +370,7 @@ void RimeWithWeaselHandler::FocusOut(DWORD param, WeaselSessionId ipc_id) {
 
 void RimeWithWeaselHandler::UpdateInputPosition(RECT const& rc,
                                                 WeaselSessionId ipc_id) {
+  UILock ui_guard;
   DLOG(INFO) << "Update input position: (" << rc.left << ", " << rc.top
              << "), ipc_id = " << ipc_id
              << ", m_active_session = " << m_active_session;
@@ -498,6 +505,8 @@ void RimeWithWeaselHandler::EndMaintenance() {
 void RimeWithWeaselHandler::SetOption(WeaselSessionId ipc_id,
                                       const std::string& opt,
                                       bool val) {
+  if (m_disabled)  // 維護期間不要碰已經 finalize 的 rime
+    return;
   // from no-session client, not actual typing session
   if (!ipc_id) {
     if (m_global_ascii_mode && opt == "ascii_mode") {
@@ -525,6 +534,7 @@ bool RimeWithWeaselHandler::_IsDeployerRunning() {
 }
 
 void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
+  UILock ui_guard;
   // if m_ui nullptr, _UpdateUI meaningless
   if (!m_ui)
     return;
@@ -558,7 +568,7 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
     m_ui->Update(weasel_context, weasel_status);
   }
 
-  _RefreshTrayIcon(session_id, _UpdateUICallback);
+  _RefreshTrayIcon(_UpdateUICallback);
 
   m_message_type.clear();
   m_message_value.clear();
@@ -569,6 +579,7 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
 void RimeWithWeaselHandler::_LoadSchemaSpecificSettings(
     WeaselSessionId ipc_id,
     const std::string& schema_id) {
+  UILock ui_guard;
   if (!m_ui)
     return;
   RimeConfig config;
@@ -682,6 +693,7 @@ void RimeWithWeaselHandler::_LoadAppInlinePreeditSet(WeaselSessionId ipc_id,
 }
 
 bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
+  UILock ui_guard;
   // show as auxiliary string
   std::wstring& tips(ctx.aux.str);
   bool show_icon = false;
@@ -1382,8 +1394,9 @@ void RimeWithWeaselHandler::_GetStatus(Status& stat,
     std::string schema_id = "";
     if (status.schema_id)
       schema_id = status.schema_id;
-    stat.schema_name = u8tow(status.schema_name);
-    stat.schema_id = u8tow(status.schema_id);
+    stat.schema_name =
+        status.schema_name ? u8tow(status.schema_name) : std::wstring();
+    stat.schema_id = status.schema_id ? u8tow(status.schema_id) : std::wstring();
     stat.ascii_mode = !!status.is_ascii_mode;
     stat.composing = !!status.is_composing;
     stat.disabled = !!status.is_disabled;
@@ -1399,7 +1412,7 @@ void RimeWithWeaselHandler::_GetStatus(Status& stat,
           // in case of inline_preedit set in schema
           _UpdateInlinePreeditStatus(ipc_id);
         // refresh icon after schema changed
-        _RefreshTrayIcon(session_id, _UpdateUICallback);
+        _RefreshTrayIcon(_UpdateUICallback);
         m_ui->style() = session_status.style;
         if (m_show_notifications.find("schema") != m_show_notifications.end() &&
             m_show_notifications_time > 0) {
@@ -1440,6 +1453,7 @@ void RimeWithWeaselHandler::_GetContext(Context& weasel_context,
 
 bool RimeWithWeaselHandler::_IsSessionTSF(RimeSessionId session_id) {
   static char client_type[20] = {0};
+  memset(client_type, 0, sizeof(client_type));
   rime_api->get_property(session_id, "client_type", client_type,
                          sizeof(client_type) - 1);
   return std::string(client_type) == "tsf";
