@@ -120,6 +120,12 @@ class WeaselTSF : public ITfTextInputProcessorEx,
   void _SetComposition(com_ptr<ITfComposition> pComposition);
   void _SetCompositionPosition(const RECT& rc);
   BOOL _UpdateCompositionWindow(com_ptr<ITfContext> pContext);
+  // 同步取一次位置（在顯示前呼叫，避免候選窗先出現在上一處游標位置再跳過來）
+  BOOL _UpdateCompositionPosition(ITfContext* pContext, TfEditCookie ec);
+  // 位置採樣序號：異步結果回來時用來丟棄過期採樣
+  ULONG _GetPositionGeneration() const { return _positionGeneration; }
+  // 目前的 composition（位置採樣一律以「執行時」的這個物件為準）
+  com_ptr<ITfComposition> _GetComposition() { return _pComposition; }
   void _FinalizeComposition();
   void _AbortComposition(bool clear = true);
 
@@ -233,4 +239,9 @@ class WeaselTSF : public ITfTextInputProcessorEx,
   BOOL _async_edit = false;
   BOOL _committed = false;
   BOOL _isToOpenClose = false;
+  // 位置採樣序號（每次請求自增，用來丟棄過期的異步結果）
+  ULONG _positionGeneration = 0;
+  // 位置去抖：app 在組字瞬間的 GetTextExt 可能前後兩幀回報不同位置
+  RECT _pendingPos = {0, 0, 0, 0};
+  DWORD _pendingSince = 0;
 };

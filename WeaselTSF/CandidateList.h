@@ -50,6 +50,8 @@ class CCandidateList : public ITfIntegratableCandidateListUIElement,
   void UpdateUI(const weasel::Context& ctx, const weasel::Status& status);
   void UpdateStyle(const weasel::UIStyle& sty);
   void UpdateInputPosition(RECT const& rc);
+  // 焦點切換後位置已不可信：在重新定位前不要顯示（否則會先在舊位置閃一下）
+  void InvalidatePosition() { _posApplied = false; }
   void Destroy();
   void DestroyAll();
   void StartUI();
@@ -85,6 +87,10 @@ class CCandidateList : public ITfIntegratableCandidateListUIElement,
       STYLE_ACTIVE_SELECTION;
 
   BOOL _pbShow;
+  // 本輪組字是否已經套用過位置（未定位前不要顯示，否則會先在上一次的位置閃一下）
+  bool _posApplied = false;
+  // 本輪是否應該顯示（位置到齊後才真正 Show）
+  bool _wantShow = false;
   weasel::UIStyle _style;
 
   com_ptr<ITfContext> _pContextDocument;

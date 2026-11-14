@@ -12,7 +12,7 @@ STDAPI WeaselTSF::DoEditSession(TfEditCookie ec) {
                                 &_cand->style());
 
   bool ok = m_client.GetResponseData(std::ref(parser));
-
+  
   _UpdateLanguageBar(_status);
 
   if (ok) {
@@ -38,6 +38,9 @@ STDAPI WeaselTSF::DoEditSession(TfEditCookie ec) {
     if (_IsComposing() && config.inline_preedit) {
       _ShowInlinePreedit(_pEditSessionContext, context);
     }
+    // 先在這個 edit session 裡同步算好位置，再交給 _UpdateUI 去 Show：
+    // 否則候選窗會先用上一次的位置顯示，等異步的 GetTextExt 回來才跳過去。
+    _UpdateCompositionPosition(_pEditSessionContext, ec);
     _UpdateCompositionWindow(_pEditSessionContext);
   }
 

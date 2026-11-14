@@ -130,6 +130,9 @@ void WeaselPanel::_CreateLayout() {
 
 // 更新界面
 void WeaselPanel::Refresh() {
+  UITryLock guard;
+  if (!guard.owns())
+    return;
   bool should_show_icon =
       (m_status.ascii_mode || !m_status.composing || !m_ctx.aux.empty());
   m_candidateCount = (BYTE)m_ctx.cinfo.candies.size();
@@ -245,6 +248,11 @@ LRESULT WeaselPanel::OnMouseWheel(UINT uMsg,
                                   WPARAM wParam,
                                   LPARAM lParam,
                                   BOOL& bHandled) {
+  UITryLock guard;
+  if (!guard.owns()) {
+    bHandled = true;
+    return 0;
+  }
   int delta = GET_WHEEL_DELTA_WPARAM(wParam);
   if (_UICallback && delta != 0) {
     bool nextpage = delta < 0;
@@ -258,6 +266,11 @@ LRESULT WeaselPanel::OnLeftClickedUp(UINT uMsg,
                                      WPARAM wParam,
                                      LPARAM lParam,
                                      BOOL& bHandled) {
+  UITryLock guard;
+  if (!guard.owns()) {
+    bHandled = true;
+    return 0;
+  }
   if (hide_candidates) {
     bHandled = true;
     return 0;
@@ -296,6 +309,11 @@ LRESULT WeaselPanel::OnLeftClickedDown(UINT uMsg,
                                        WPARAM wParam,
                                        LPARAM lParam,
                                        BOOL& bHandled) {
+  UITryLock guard;
+  if (!guard.owns()) {
+    bHandled = true;
+    return 0;
+  }
   if (hide_candidates) {
     bHandled = true;
     return 0;
@@ -410,6 +428,9 @@ VOID CALLBACK WeaselPanel::OnTimer(_In_ HWND hwnd,
                                    _In_ UINT uMsg,
                                    _In_ UINT_PTR idEvent,
                                    _In_ DWORD dwTime) {
+  UITryLock guard;
+  if (!guard.owns())
+    return;
   ::KillTimer(hwnd, idEvent);
   WeaselPanel* self = (WeaselPanel*)ptimer;
   ptimer = 0;
@@ -423,6 +444,11 @@ LRESULT WeaselPanel::OnMouseMove(UINT uMsg,
                                  WPARAM wParam,
                                  LPARAM lParam,
                                  BOOL& bHandled) {
+  UITryLock guard;
+  if (!guard.owns()) {
+    bHandled = true;
+    return 0;
+  }
   if (m_style.hover_type == UIStyle::NONE)
     return 0;
   if (m_mouse_entry == false) {
@@ -468,6 +494,11 @@ LRESULT WeaselPanel::OnMouseLeave(UINT uMsg,
                                   WPARAM wParam,
                                   LPARAM lParam,
                                   BOOL& bHandled) {
+  UITryLock guard;
+  if (!guard.owns()) {
+    bHandled = true;
+    return 0;
+  }
   m_hoverIndex = -1;
   InvalidateRect(&rcw, true);
   m_mouse_entry = false;
@@ -935,6 +966,9 @@ bool WeaselPanel::_DrawCandidates(CDCHandle& dc, bool back) {
 
 // draw client area
 void WeaselPanel::DoPaint(CDCHandle dc) {
+  UITryLock guard;
+  if (!guard.owns())
+    return;
   // turn off WS_EX_TRANSPARENT, for better resp performance
   ModifyStyleEx(WS_EX_TRANSPARENT, WS_EX_LAYERED);
   GetClientRect(&rcw);
@@ -1069,6 +1103,9 @@ void WeaselPanel::DoPaint(CDCHandle dc) {
 // 由于某些软件并不依赖 WM_PAINT 消息来重绘，在消息循环中直接忽略掉了 WM_PAINT
 // 消息， 导致 DoPaint() 永远不会被调用，这里手动调用 DoPaint() 强制重绘
 void WeaselPanel::RedrawWindow() {
+  UITryLock guard;
+  if (!guard.owns())
+    return;
   HDC hdc = GetDC();
   DoPaint(hdc);
   ReleaseDC(hdc);
@@ -1092,7 +1129,12 @@ LRESULT WeaselPanel::OnCreate(UINT uMsg,
                               WPARAM wParam,
                               LPARAM lParam,
                               BOOL& bHandled) {
-  m_mouse_entry = false;
+  UITryLock guard;
+  if (!guard.owns()) {
+    bHandled = true;
+    return 0;
+  }
+    m_mouse_entry = false;
   m_hoverIndex = -1;
   Refresh();
   return TRUE;
@@ -1102,8 +1144,13 @@ LRESULT WeaselPanel::OnDestroy(UINT uMsg,
                                WPARAM wParam,
                                LPARAM lParam,
                                BOOL& bHandled) {
+  UITryLock guard;
+  if (!guard.owns()) {
+    bHandled = true;
+    return 0;
+  }
   m_hoverIndex = -1;
-  m_sticky = false;
+    m_sticky = false;
   delete m_layout;
   m_layout = NULL;
   return 0;
@@ -1113,17 +1160,30 @@ LRESULT WeaselPanel::OnDpiChanged(UINT uMsg,
                                   WPARAM wParam,
                                   LPARAM lParam,
                                   BOOL& bHandled) {
+  UITryLock guard;
+  if (!guard.owns()) {
+    bHandled = true;
+    return 0;
+  }
   Refresh();
   return LRESULT();
 }
 
 void WeaselPanel::MoveTo(RECT const& rc) {
-  if (!m_layout)
-    return;  // avoid handling nullptr in _RepositionWindow
+  UITryLock guard;
+  if (!guard.owns()) {
+        return;
+  }
   m_redraw_by_monitor_change = false;
-  // if ascii_tip_follow_cursor set, move tip icon to mouse cursor
+  // 面板此刻可能還沒有 layout（例如 inline preedit 當下沒有候選，
+  // Refresh() 會跳過 _CreateLayout）。這種情況仍然要把錨點記下來，
+  // 否則緊接著 _ui->Update() 建立 layout 時會用「上一次的位置」定位，
+  // 候選窗就會先在舊位置出現幾幀、再被下一幀的採樣糾正過去。
+  const bool has_layout = (m_layout != NULL);
+  const bool should_show_icon = has_layout && m_layout->ShouldDisplayStatusIcon();
+    // if ascii_tip_follow_cursor set, move tip icon to mouse cursor
   if (m_style.ascii_tip_follow_cursor && m_ctx.empty() &&
-      (!m_status.composing) && m_layout->ShouldDisplayStatusIcon()) {
+      (!m_status.composing) && should_show_icon) {
     // ascii icon follow cursor
     POINT p;
     ::GetCursorPos(&p);
@@ -1133,24 +1193,31 @@ void WeaselPanel::MoveTo(RECT const& rc) {
     RedrawWindow();
   } else if (!(rc.left == m_inputPos.left && rc.bottom != m_inputPos.bottom &&
                abs(rc.bottom - m_inputPos.bottom) < 6) ||
-             m_layout->ShouldDisplayStatusIcon()) {
+             should_show_icon) {
     // in some apps like word 2021, with inline_preedit set,
     // bottom of rc would flicker 1 px or 2, make the candidate flickering
     m_inputPos = rc;
     m_inputPos.OffsetRect(0, 6);
+    if (!has_layout)
+      return;  // 錨點已記下，等 Refresh() 建立 layout 後會用它定位
     // buffer current m_istorepos status
     bool m_istorepos_buf = m_istorepos;
     // with parameter to avoid vertical flicker
     _RepositionWindow(true);
     // m_istorepos status changed by _RepositionWindow, or tips to show,
     // redrawing is required
-    if (m_istorepos != m_istorepos_buf || !m_ctx.aux.empty() ||
-        m_layout->ShouldDisplayStatusIcon() || m_redraw_by_monitor_change)
+    RECT wr = {0, 0, 0, 0};
+    GetWindowRect(&wr);
+        if (m_istorepos != m_istorepos_buf || !m_ctx.aux.empty() ||
+        should_show_icon || m_redraw_by_monitor_change)
       RedrawWindow();
   }
 }
 
 void WeaselPanel::_RepositionWindow(const bool& adj) {
+  if (!m_layout) {
+        return;  // 沒有 layout 就沒有 offset/尺寸可算，避免空指標
+  }
   RECT rcWorkArea;
   memset(&rcWorkArea, 0, sizeof(rcWorkArea));
   HMONITOR hMonitor = MonitorFromRect(m_inputPos, MONITOR_DEFAULTTONEAREST);
@@ -1199,9 +1266,10 @@ void WeaselPanel::_RepositionWindow(const bool& adj) {
   if (x < rcWorkArea.left)
     x = rcWorkArea.left;  // over workarea left
   // show panel above the input focus if we're around the bottom
-  if (y > rcWorkArea.bottom || m_sticky) {
-    if (!m_sticky)
-      m_sticky = true;
+  // 不要鎖存 m_sticky：一旦鎖存，游標移回螢幕中間時面板仍然強制顯示在上方，
+  // 看起來就是「跳」。每次重新依工作區判斷即可（resize 時 m_inputPos.bottom
+  // 已被記憶成面板頂端，所以尺寸變化不會把面板彈回下方）。
+  if (y > rcWorkArea.bottom) {
     y = m_inputPos.top - height - 6;  // over workarea bottom
     if (DPI_SCALE(m_style.shadow_radius) &&
         DPI_SCALE(m_style.shadow_offset_y) > 0)
@@ -1216,10 +1284,9 @@ void WeaselPanel::_RepositionWindow(const bool& adj) {
   }
   if (y < rcWorkArea.top)
     y = rcWorkArea.top;  // over workarea top
-  // memorize adjusted position (to avoid window bouncing on height change)
+    // memorize adjusted position (to avoid window bouncing on height change)
   m_inputPos.bottom = y;
-  SetWindowPos(HWND_TOPMOST, x, y, 0, 0,
-               SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW);
+  SetWindowPos(HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW);
 }
 
 void WeaselPanel::_TextOut(const CRect& rc,

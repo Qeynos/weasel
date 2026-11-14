@@ -74,7 +74,7 @@ STDMETHODIMP CCandidateList::GetGUID(GUID* pguid) {
 }
 
 STDMETHODIMP CCandidateList::Show(BOOL showCandidateWindow) {
-  if (showCandidateWindow)
+    if (showCandidateWindow)
     _ui->Show();
   else
     _ui->Hide();
@@ -205,15 +205,18 @@ void CCandidateList::UpdateUI(const Context& ctx, const Status& status) {
     _ui->style().client_caps &= ~weasel::INLINE_PREEDIT_CAPABLE;
   }
 
-  /// In UWP, candidate window will only be shown
+    /// In UWP, candidate window will only be shown
   /// if it is owned by active view window
   //_UpdateOwner();
   _ui->Update(ctx, status);
   if (_pbShow == FALSE)
     _UpdateUIElement();
 
+  // 只有「本輪組字已經定位過」才顯示：否則面板會先用上一次的位置露出來，
+  // 等下一次採樣到了才跳到正確位置——就是肉眼看到的「閃一下」。
+  _wantShow = (status.composing != FALSE) && (_pbShow != FALSE);
   if (status.composing)
-    Show(_pbShow);
+    Show(_pbShow && _posApplied);
   else
     Show(FALSE);
 }
@@ -224,6 +227,12 @@ void CCandidateList::UpdateStyle(const UIStyle& sty) {
 
 void CCandidateList::UpdateInputPosition(RECT const& rc) {
   _ui->UpdateInputPosition(rc);
+  if (!_posApplied) {
+    _posApplied = true;
+    // 位置是異步到齊的：到了才顯示，否則面板會先停在上一次的位置閃一下
+    if (_wantShow)
+      Show(TRUE);
+  }
 }
 
 void CCandidateList::Destroy() {
@@ -304,7 +313,9 @@ void CCandidateList::StartUI() {
       _tsf->HandleUICallback(sel, hov, next, scroll_next);
     });
   pUIElementMgr->BeginUIElement(this, &_pbShow, &uiid);
-  // pUIElementMgr->UpdateUIElement(uiid);
+    // pUIElementMgr->UpdateUIElement(uiid);
+  _posApplied = false;
+  _wantShow = false;
   if (_pbShow) {
     _ui->style() = _style;
     _MakeUIWindow();
@@ -312,7 +323,7 @@ void CCandidateList::StartUI() {
 }
 
 void CCandidateList::EndUI() {
-  com_ptr<ITfThreadMgr> pThreadMgr = _tsf->_GetThreadMgr();
+    com_ptr<ITfThreadMgr> pThreadMgr = _tsf->_GetThreadMgr();
   if (pThreadMgr) {
     com_ptr<ITfUIElementMgr> emgr;
     auto hr = pThreadMgr->QueryInterface(&emgr);
