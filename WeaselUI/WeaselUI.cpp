@@ -37,7 +37,11 @@ class weasel::UIImpl {
   DWORD showDelayMs = DEFAULT_SHOW_DELAY_MS;
   // 觀測:Show 被請求後，位置從“舊採樣”變成“正確位置”花了多久(EMA)
   DWORD settleEma = 0;
+  // 慢衰減的峰值：均值天然低于峰值，只按均值等就會漏掉偏慢的那幾次。這裡保留
+  // 一個每樣本只衰減 1/8 的峰值，讓估計向“寧可多等”偏置。
+  DWORD settlePeak = 0;
   DWORD settleStart = 0;
+  DWORD shownAt = 0;  // 最近一次真正顯示的時間，用於偵測“已經露了舊位置”
   RECT settlePos = {0, 0, 0, 0};
   bool settleWatch = false;
   static UINT_PTR timer;
@@ -50,6 +54,17 @@ class weasel::UIImpl {
   // 否則會先用上一次組字的位置閃一下。已可見後的顯示則立即執行。
   bool freshWindow = true;
   void OnPositionApplied();
+  void UpdateShowDelay() {
+    // 均值項 + 峰值項，取大者，再留 5ms 餘量
+    DWORD want = settleEma * 3 / 2 + 5;
+    if (settlePeak + 5 > want)
+      want = settlePeak + 5;
+    if (want < 15)
+      want = 15;
+    if (want > 60)
+      want = 60;
+    showDelayMs = want;
+  }
   void ResetShowState() {
     showPending = false;
     freshWindow = true;
@@ -75,6 +90,7 @@ void UIImpl::Show() {
 
   if (panel.IsWindowVisible()) {
     shown = true;
+    shownAt = ::GetTickCount();
     return;
   }
 
@@ -83,6 +99,7 @@ void UIImpl::Show() {
   if (!freshWindow) {
     panel.ShowWindow(SW_SHOWNA);
     shown = true;
+    shownAt = ::GetTickCount();
     return;
   }
 
@@ -103,24 +120,41 @@ void UIImpl::Show() {
 // 位置發生了變化，說明這幾個採樣還是上一次組字的光標；觀測從 Show 到穩定的
 // 間隔，用 EMA 估計下一次該等多久，讓不同設備/不同應用各自收斂。
 void UIImpl::OnPositionApplied() {
-  if (!settleWatch)
-    return;
   RECT wr = {0, 0, 0, 0};
   if (!panel.IsWindow() || !panel.GetWindowRect(&wr))
     return;
-  if (wr.left == settlePos.left && wr.top == settlePos.top)
-    return;  // 位置沒變，這一幀不是抖動
-  const DWORD sample = ::GetTickCount() - settleStart;
-  settleWatch = false;
-  if (sample > 500)
-    return;  // 是使用者真的換了位置，不是採樣抖動
-  settleEma = (settleEma == 0) ? sample : (settleEma * 3 + sample) / 4;
-  DWORD want = settleEma * 3 / 2 + 5;  // 1.5 倍 + 5ms 餘量
-  if (want < 15)
-    want = 15;
-  if (want > 60)
-    want = 60;
-  showDelayMs = want;
+
+  const DWORD now = ::GetTickCount();
+  const bool moved =
+      (wr.left != settlePos.left || wr.top != settlePos.top);
+
+  if (settleWatch) {
+    if (!moved)
+      return;  // 位置沒變，這一幀不是抖動
+    const DWORD sample = now - settleStart;
+    settleWatch = false;
+    settlePos = wr;
+    if (sample > 500)
+      return;  // 是使用者真的換了位置，不是採樣抖動
+    settleEma = (settleEma == 0) ? sample : (settleEma * 3 + sample) / 4;
+    settlePeak = (settlePeak > sample / 8) ? (settlePeak - settlePeak / 8)
+                                           : sample;
+    if (settlePeak < sample)
+      settlePeak = sample;
+    UpdateShowDelay();
+    return;
+  }
+
+  // 已經顯示過之後位置又變了：說明剛才那一幀顯示的是舊位置（漏幀）。
+  // 把它當作失敗樣本，立即抬高峰值，下一次組字多等一點。
+  if (panel.IsWindowVisible() && shownAt != 0 && moved) {
+    const DWORD late = now - shownAt;
+    if (late <= 120) {  // 只統計“剛顯示就立刻糾正”的情況
+      settlePeak = (late + 5 > settlePeak) ? (late + 5) : settlePeak;
+      UpdateShowDelay();
+    }
+  }
+  settlePos = wr;
 }
 
 void UIImpl::Hide() {
@@ -165,6 +199,7 @@ VOID CALLBACK UIImpl::OnTimer(_In_ HWND hwnd,
       if (self->panel.IsWindow()) {
         self->panel.ShowWindow(SW_SHOWNA);
         self->shown = true;
+        self->shownAt = ::GetTickCount();
       }
     }
     return;
