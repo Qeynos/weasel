@@ -31,6 +31,10 @@ class weasel::UIImpl {
                                _In_ DWORD dwTime);
   static const int AUTOHIDE_TIMER = 20121220;
   static const int SHOW_TIMER = 20121221;
+  // 新建窗口的首次顯示延遲。實測(Notepad3/DSH 日誌)從 Show 被請求到「正確
+  // 位置」落地只差 5~9ms，舊採樣窗口在 StartComposition 前後就開始了，到
+  // Show 時已經消耗掉大半，所以 25ms 已有 2.5 倍以上餘量；45ms 是過度保守。
+  static const DWORD SHOW_DELAY_MS = 25;
   static UINT_PTR timer;
   static UIImpl* show_self;
   bool shown;
@@ -67,7 +71,7 @@ void UIImpl::Show() {
     return;
   }
 
-  // 剛建出來的新窗口：先等 45ms，讓這一輪的位置採樣穩定（前幾個採樣往往
+  // 剛建出來的新窗口：先等一下，讓這一輪的位置採樣穩定（前幾個採樣往往
   // 還是上一次組字的光標）。已經顯示過的窗口直接顯示，不引入額外延遲。
   if (!freshWindow) {
     panel.ShowWindow(SW_SHOWNA);
@@ -80,7 +84,7 @@ void UIImpl::Show() {
 
   showPending = true;
   show_self = this;
-  SetTimer(panel.m_hWnd, SHOW_TIMER, 45, &UIImpl::OnTimer);
+  SetTimer(panel.m_hWnd, SHOW_TIMER, SHOW_DELAY_MS, &UIImpl::OnTimer);
 }
 
 void UIImpl::Hide() {
