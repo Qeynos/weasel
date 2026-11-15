@@ -13,17 +13,30 @@ const DWORD kClientReadTimeoutMs = 3000;
 
 // 消息模式下，只要管道裏有可讀數據，就說明一條完整報文已經到達
 // （服務端總是用一次 WriteFile 寫完整條報文），因此可以安全地 ReadFile。
+//
+// 注意等待方式：Sleep(1) 在默認計時器精度下實際會睡 ~15.6ms，而每次按鍵的
+// 請求都要在這裏等 1~2 次（報頭 + 正文），直接 Sleep(1) 會給每個按鍵增加
+// 15~30ms 的可感延遲。服務端的回應通常在數百微秒內到達，所以先用
+// SwitchToThread 讓出時間片輪詢，再退化成 Sleep(0)，只有在確實長時間沒有
+// 回應（例如服務端卡住）時才用 Sleep(1)，兼顧延遲與空轉成本。
 bool _WaitReadable(HANDLE pipe, DWORD timeout_ms) {
-  ULONGLONG start = ::GetTickCount64();
-  for (;;) {
+  const ULONGLONG start = ::GetTickCount64();
+  const DWORD kYieldPhaseMs = 2;  // 這 2ms 內用 Sleep(0)，不進入 15.6ms 的睡眠
+  for (int spin = 0;; ++spin) {
     DWORD avail = 0;
     if (!::PeekNamedPipe(pipe, NULL, 0, NULL, &avail, NULL))
       return false;  // 管道已斷開
     if (avail > 0)
       return true;
-    if (::GetTickCount64() - start >= timeout_ms)
+    const ULONGLONG waited = ::GetTickCount64() - start;
+    if (waited >= timeout_ms)
       return false;
-    ::Sleep(1);
+    if (spin < 500)
+      ::SwitchToThread();
+    else if (waited < kYieldPhaseMs)
+      ::Sleep(0);
+    else
+      ::Sleep(1);
   }
 }
 }  // namespace
