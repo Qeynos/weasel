@@ -143,12 +143,17 @@ void ClientImpl::TrayCommand(UINT menuId) {
 }
 
 void ClientImpl::StartSession() {
-  if (_Active() && Echo())
-    return;
+  // 寫客戶端信息走的是緩衝區流，理論上可能拋異常；同樣不能讓它穿出回調。
+  try {
+    if (_Active() && Echo())
+      return;
 
-  _WriteClientInfo();
-  UINT ret = _SendMessage(WEASEL_IPC_START_SESSION, 0, 0);
-  session_id = ret;
+    _WriteClientInfo();
+    UINT ret = _SendMessage(WEASEL_IPC_START_SESSION, 0, 0);
+    session_id = ret;
+  } catch (...) {
+    session_id = 0;
+  }
 }
 
 void ClientImpl::EndSession() {
@@ -179,7 +184,16 @@ bool ClientImpl::GetResponseData(ResponseHandler const& handler) {
     return false;
   }
 
-  return channel.HandleResponseData(handler);
+  // 這裡是 TSF/IMM32 的回調路徑：_Receive 在超時或管道斷開時會拋 DWORD，
+  // 若讓異常穿出回調，Windows 會以 0xc000041d(fatal user callback exception)
+  // 直接終止宿主進程。所以讀取回應的入口也必須兜住。
+  try {
+    return channel.HandleResponseData(handler);
+  } catch (DWORD /* err */) {
+    return false;
+  } catch (...) {
+    return false;
+  }
 }
 
 bool ClientImpl::_WriteClientInfo() {
