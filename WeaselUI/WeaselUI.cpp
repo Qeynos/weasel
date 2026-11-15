@@ -31,10 +31,15 @@ class weasel::UIImpl {
                                _In_ DWORD dwTime);
   static const int AUTOHIDE_TIMER = 20121220;
   static const int SHOW_TIMER = 20121221;
-  // 新建窗口的首次顯示延遲。實測(Notepad3/DSH 日誌)從 Show 被請求到「正確
-  // 位置」落地只差 5~9ms，舊採樣窗口在 StartComposition 前後就開始了，到
-  // Show 時已經消耗掉大半，所以 25ms 已有 2.5 倍以上餘量；45ms 是過度保守。
-  static const DWORD SHOW_DELAY_MS = 25;
+  // 新建窗口的首次顯示延遲：默認 25ms，之後按本進程實際觀測到的“位置穩定
+  // 時間”自適應調整(見 OnPositionApplied)，範圍 [15, 60]ms。
+  static const DWORD DEFAULT_SHOW_DELAY_MS = 25;
+  DWORD showDelayMs = DEFAULT_SHOW_DELAY_MS;
+  // 觀測:Show 被請求後，位置從“舊採樣”變成“正確位置”花了多久(EMA)
+  DWORD settleEma = 0;
+  DWORD settleStart = 0;
+  RECT settlePos = {0, 0, 0, 0};
+  bool settleWatch = false;
   static UINT_PTR timer;
   static UIImpl* show_self;
   bool shown;
@@ -44,9 +49,11 @@ class weasel::UIImpl {
   // 窗口是不是本輪組字剛建出來的：新建窗口的第一次顯示要等一下位置採樣穩定，
   // 否則會先用上一次組字的位置閃一下。已可見後的顯示則立即執行。
   bool freshWindow = true;
+  void OnPositionApplied();
   void ResetShowState() {
     showPending = false;
     freshWindow = true;
+    settleWatch = false;
     if (show_self == this)
       show_self = nullptr;
     if (panel.IsWindow())
@@ -84,7 +91,36 @@ void UIImpl::Show() {
 
   showPending = true;
   show_self = this;
-  SetTimer(panel.m_hWnd, SHOW_TIMER, SHOW_DELAY_MS, &UIImpl::OnTimer);
+  // 記錄“等待起點”，供 OnPositionApplied 觀測本程序的實際穩定時間
+  settleWatch = true;
+  settleStart = ::GetTickCount();
+  settlePos = RECT{0, 0, 0, 0};
+  panel.GetWindowRect(&settlePos);
+  SetTimer(panel.m_hWnd, SHOW_TIMER, showDelayMs, &UIImpl::OnTimer);
+}
+
+// 位置被真正應用時回調(UI::UpdateInputPosition 之後)。如果在“等待顯示”期間
+// 位置發生了變化，說明這幾個採樣還是上一次組字的光標；觀測從 Show 到穩定的
+// 間隔，用 EMA 估計下一次該等多久，讓不同設備/不同應用各自收斂。
+void UIImpl::OnPositionApplied() {
+  if (!settleWatch)
+    return;
+  RECT wr = {0, 0, 0, 0};
+  if (!panel.IsWindow() || !panel.GetWindowRect(&wr))
+    return;
+  if (wr.left == settlePos.left && wr.top == settlePos.top)
+    return;  // 位置沒變，這一幀不是抖動
+  const DWORD sample = ::GetTickCount() - settleStart;
+  settleWatch = false;
+  if (sample > 500)
+    return;  // 是使用者真的換了位置，不是採樣抖動
+  settleEma = (settleEma == 0) ? sample : (settleEma * 3 + sample) / 4;
+  DWORD want = settleEma * 3 / 2 + 5;  // 1.5 倍 + 5ms 餘量
+  if (want < 15)
+    want = 15;
+  if (want > 60)
+    want = 60;
+  showDelayMs = want;
 }
 
 void UIImpl::Hide() {
@@ -228,15 +264,15 @@ void UI::Refresh() {
 
 void UI::UpdateInputPosition(RECT const& rc) {
   UILock guard;
-  bool has_window = pimpl_ && pimpl_->panel.IsWindow();
-    if (has_window) {
+  if (pimpl_ && pimpl_->panel.IsWindow()) {
     pimpl_->panel.MoveTo(rc);
+    pimpl_->OnPositionApplied();
   }
 }
 
 void UI::Update(const Context& ctx, const Status& status) {
   UILock guard;
-    if (ctx_ == ctx && status_ == status)
+  if (ctx_ == ctx && status_ == status)
     return;
   ctx_ = ctx;
   status_ = status;
